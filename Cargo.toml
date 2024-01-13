@@ -10,7 +10,6 @@ serenity = { default-features = false, features = ["client", "gateway", "rustls_
 async-openai = "0.18.0"
 reqwest = "0.11.23"
 serde = { version = "1.0.195", features = ["derive"] }
-serde_json = "1.0"
 dotenv = "0.15.0"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 openssl = { version = "0.10.62", features = ["vendored"] }
