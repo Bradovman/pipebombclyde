@@ -1,0 +1,9 @@
+#Pipebomb Clyde configuration file
+
+#discord_token = "discord token" # Default to use env DISCORD_TOKEN
+#ai_base_url = https://api.together.xyz/v1 #Default to https://api.together.xyz/v1
+#ai_api_key = "ai_key" # Default to use env OPENAI_API_KEY
+model_name = "mistralai/Mistral-7B-Instruct-v0.1"
+bot_id = 123123 # The user id of your bot get from discord developer
+channel_ids = [] # The channel id's of the channels you want the bot to reply in
+ignore_prefix = "!" # Prefix used to mark a message that the bot should NOT respond to
