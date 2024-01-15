@@ -2,6 +2,7 @@ use std::env;
 use std::time::Duration;
 use std::fs;
 
+
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
@@ -14,7 +15,7 @@ use async_openai::types::{
 
 // Thanks to https://github.com/dnanhkhoa/acm/ for the basis of the oai stuff
 
-#[derive(Serialize)]
+#[derive(Deserialize)]
 struct TomlConfig {
     discord_token: Option<String>,
     ai_base_url: Option<String>,
@@ -74,7 +75,7 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         if self.discord_config.channels.contains(&msg.channel_id.get())
             && msg.author.id.get() != self.discord_config.bot_id
-            && !msg.content.starts_with(self.discord_config.ignore_prefix.to_string()) {
+            && !msg.content.starts_with(&self.discord_config.ignore_prefix.to_string()) {
             let payload = CreateChatCompletionRequestArgs::default()
                 .max_tokens(self.config.max_tokens)
                 .model(&self.config.model_name)
@@ -138,25 +139,26 @@ async fn main() {
     //
     // Parsing config file.
     //
+
     let toml_config: TomlConfig = toml::from_str(
         &fs::read_to_string("config.toml")
-            .expect("Could not find configuration file!"))
-        .expect("Could not parse configuration file.");
+            .expect("Couldn't read config file"))
+        .expect("Couldn't parse config file");
 
 
 
     //
     // Openai/Together
     //
-    let oai_api_key = toml_config.ai_api_key.unwrap_or_else(
-        env::var("OPENAI_API_KEY").expect("$OPENAI_API_KEY is not set"));
+    let oai_api_key = toml_config.ai_api_key.unwrap_or_else(|| {
+        env::var("OPENAI_API_KEY").expect("$OPENAI_API_KEY is not set")});
 
 
 
 
     //Setup config
     let config = OAIConfig {
-        api_base_url: toml_config.ai_base_url.unwrap_or_else("https://api.together.xyz/v1".to_string()),
+        api_base_url: toml_config.ai_base_url.unwrap_or_else(|| {"https://api.together.xyz/v1".to_string()}),
         api_key: oai_api_key,
         model_name: toml_config.model_name,
         system_prompt: fs::read_to_string("system.prompt").expect("Unable to open prompt file"),
@@ -174,8 +176,8 @@ async fn main() {
     //
 
     // Configure the client with your Discord bot token in the environment.
-    let token = toml_config.discord_token.unwrap_or_else(
-        env::var("DISCORD_TOKEN").expect("Expected a token in the environment"));
+    let token = toml_config.discord_token.unwrap_or_else(|| {
+        env::var("DISCORD_TOKEN").expect("Expected a token in the environment")});
 
     // Set gateway intents, which decides what events the bot will be notified about
     let intents = GatewayIntents::GUILD_MESSAGES
