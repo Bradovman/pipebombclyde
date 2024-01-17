@@ -1,4 +1,5 @@
 mod threads;
+mod channels;
 
 use std::env;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use serde::{Deserialize, Serialize};
-use async_openai::types::{ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseMessage, CreateChatCompletionRequestArgs};
+use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseMessage, CreateChatCompletionRequestArgs};
 use serenity::all::CreateMessage;
 
 // Thanks to https://github.com/dnanhkhoa/acm/ for the basis of the oai stuff
@@ -27,7 +28,7 @@ struct TomlConfig {
     tts: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct OAIConfig {
     api_base_url: String,
     // The base URL of the Inference API provider
@@ -42,6 +43,7 @@ pub struct OAIConfig {
     request_timeout: u64,  // The timeout for the request in seconds
 }
 
+#[derive(Clone)]
 struct DiscordConfig {
     channels: Vec<u64>,
     bot_id: u64,
@@ -61,8 +63,6 @@ struct ResponseCandidates {
 }
 
 
-
-
 struct Handler {
     config: OAIConfig,
     http_client: reqwest::Client,
@@ -77,23 +77,51 @@ impl EventHandler for Handler {
     // Event handlers are dispatched through a threadpool, and so multiple events can be dispatched
     // simultaneously.
     async fn message(&self, ctx: Context, msg: Message) {
-        if self.discord_config.channels.contains(&msg.channel_id.get())
-            && msg.author.id.get() != self.discord_config.bot_id
-            && !msg.content.starts_with(&self.discord_config.ignore_prefix.to_string()) {
-            let payload = CreateChatCompletionRequestArgs::default()
-                .max_tokens(self.config.max_tokens)
-                .model(&self.config.model_name)
-                .temperature(0.7)
-                .messages([
+
+        // Make sure we should even try to process the message
+        // If it doesnt start with ignore_prefix and that the it is in a supported channel
+        if (!msg.content.starts_with(&self.discord_config.ignore_prefix))
+            && msg.author.id.get() != self.discord_config.bot_id // Make sure he's not responding to himself
+            && !msg.author.system
+            && (self.discord_config.channels.contains(&msg.channel_id.get())
+            || {
+            // Checks to see if the message is in a thread, if it is
+            // then check to see if parent channel is in channel config
+            if msg.thread.is_some() {
+                self.discord_config.channels.contains(&msg.thread.as_ref().unwrap().parent_id.unwrap().get())
+            } else { false }
+        }) {
+            let mut messages: Vec<ChatCompletionRequestMessage> = vec![];
+
+            let guild = msg.channel_id.to_channel(&ctx.http).await
+                .expect("Message not in channel").guild().expect("Channel Not in server?");
+
+            if guild.thread_metadata.is_some() {
+                // Retrieves last 10 messages in thread
+                messages = threads::thread_manager(&ctx, &msg, guild, &self.discord_config, &self.config).await;
+            } else {
+                // messages = channels::reply_chain_to_query(&msg, &self.discord_config, &self.config).await;
+
+
+                messages = vec![
                     ChatCompletionRequestSystemMessageArgs::default()
                         .content(&self.config.system_prompt)
                         .build().expect("Couldn't make system message").into(),
                     ChatCompletionRequestUserMessageArgs::default()
                         .content(format!("{}: {}", msg.author.name, msg.content))
                         .build().expect("Couldn't make user message").into(),
-                ])
+                ]
+            }
+
+
+            let payload = CreateChatCompletionRequestArgs::default()
+                .max_tokens(self.config.max_tokens)
+                .model(&self.config.model_name)
+                .temperature(0.7)
+                .messages(messages)
                 .build()
                 .expect("Couldn't make request payload");
+            // println!("{:#?}", payload);
 
             // Send request for inference
             let response = self.http_client
@@ -121,9 +149,8 @@ impl EventHandler for Handler {
             // Sending a message can fail, due to a network error, an authentication error, or lack
             // of permissions to post in the channel, so log to stdout when some error happens,
             // with a description of it.
-
             let builder = CreateMessage::new()
-                .content(message.to_string().replace("Pipebomb Clyde: ", ""))
+                .content(message.to_string().replace("Pipebomb Clyde:", ""))
                 .tts(self.discord_config.tts).reference_message(&msg);
 
             if let Err(why) = msg.channel_id.send_message(&ctx.http, builder).await
@@ -135,10 +162,10 @@ impl EventHandler for Handler {
 
 
     // Set a handler to be called on the `ready` event. This is called when a shard is booted, and
-    // a READY payload is sent by Discord. This payload contains data like the current user's guild
-    // Ids, current user data, private channels, and more.
-    //
-    // In this case, just print what the current user's username is.
+// a READY payload is sent by Discord. This payload contains data like the current user's guild
+// Ids, current user data, private channels, and more.
+//
+// In this case, just print what the current user's username is.
     async fn ready(&self, _: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
     }
@@ -156,19 +183,17 @@ async fn main() {
         .expect("Couldn't parse config file");
 
 
-
     //
     // Openai/Together
     //
     let oai_api_key = toml_config.ai_api_key.unwrap_or_else(|| {
-        env::var("OPENAI_API_KEY").expect("$OPENAI_API_KEY is not set")});
-
-
+        env::var("OPENAI_API_KEY").expect("$OPENAI_API_KEY is not set")
+    });
 
 
     //Setup config
     let config = OAIConfig {
-        api_base_url: toml_config.ai_base_url.unwrap_or_else(|| {"https://api.together.xyz/v1".to_string()}),
+        api_base_url: toml_config.ai_base_url.unwrap_or_else(|| { "https://api.together.xyz/v1".to_string() }),
         api_key: oai_api_key,
         model_name: toml_config.model_name,
         system_prompt: fs::read_to_string("system.prompt").expect("Unable to open prompt file"),
@@ -187,7 +212,8 @@ async fn main() {
 
     // Configure the client with your Discord bot token in the environment.
     let token = toml_config.discord_token.unwrap_or_else(|| {
-        env::var("DISCORD_TOKEN").expect("Expected a token in the environment")});
+        env::var("DISCORD_TOKEN").expect("Expected a token in the environment")
+    });
 
     // Set gateway intents, which decides what events the bot will be notified about
     let intents = GatewayIntents::GUILD_MESSAGES
@@ -198,12 +224,12 @@ async fn main() {
         channels: toml_config.channel_ids,
         bot_id: toml_config.bot_id,
         ignore_prefix: toml_config.ignore_prefix,
-        tts: toml_config.tts
+        tts: toml_config.tts,
     };
 
 
     // Create handler for messages.
-    let handler = Handler { config, http_client, discord_config};
+    let handler = Handler { config, http_client, discord_config };
 
     // Create a new instance of the Client, logging in as a bot. This will automatically prepend
     // your bot token with "Bot ", which is a requirement by Discord for bot users.
